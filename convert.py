@@ -11,20 +11,20 @@ import time
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 # ==========================================
-#             CONFIGURATION MANAGER
+#              CONFIGURATION MANAGER
 # ==========================================
 
 class ConfigManager:
     def __init__(self):
         self.settings_dir = os.path.join(os.path.dirname(__file__), "settings")
-        self.config_file = os.path.join(self.settings_dir, "config3.json")
+        self.config_file = os.path.join(self.settings_dir, "config_v23.json")
         
         if not os.path.exists(self.settings_dir):
             os.makedirs(self.settings_dir)
             
         self.default_config = {
             "tool_path": "",
-            "decoder_path": "", # New: For WEM -> WAV
+            "decoder_path": "", 
             "extract_input_dir": os.getcwd(),
             "extract_output_dir": os.getcwd(),
             "convert_input_dir": os.getcwd(),
@@ -33,7 +33,12 @@ class ConfigManager:
             "patch_wem_dir": os.getcwd(),
             "patch_wav_source_dir": os.getcwd(),
             "patch_output_dir": os.getcwd(),
-            "wav_tools_dir": os.getcwd()
+            "wav_tools_dir": os.getcwd(),
+            # UI Persist keys
+            "fade_duration": "1.5",
+            "trim_fade_duration": "1.5",
+            "trim_start": "0",
+            "trim_end": "10"
         }
         self.config = self.load_config()
 
@@ -66,9 +71,11 @@ class ConfigManager:
 
     def get(self, key):
         val = self.config.get(key, "")
-        if val and (os.path.isdir(val) or os.path.isfile(val)):
-            return val
-        return self.default_config.get(key, os.getcwd())
+        return val if val else self.default_config.get(key, "")
+
+    def set(self, key, value):
+        self.config[key] = value
+        self.save_config()
 
     def set_path(self, key, path):
         if not path: return
@@ -89,7 +96,7 @@ class ConfigManager:
         self.save_config()
 
 # ==========================================
-#               WAV MANIPULATOR
+#                WAV MANIPULATOR
 # ==========================================
 
 class WavManipulator:
@@ -159,7 +166,46 @@ class WavManipulator:
             return False
 
     @staticmethod
-    def smart_split_and_encode(ordered_file_list, big_file, output_folder, auto_encode, tool_path, log_func):
+    def run_single_trim(input_file, output_file, start_time, end_time, fade_duration, log_func):
+        """Standard trimmer included for the UI tab"""
+        try:
+            duration = end_time - start_time
+            if duration <= 0:
+                log_func("[ERROR] End time must be greater than start time.\n")
+                return
+
+            log_func(f"Trimming: {os.path.basename(input_file)}\n -> Start: {start_time}s, End: {end_time}s (Dur: {duration}s)\n")
+
+            cmd = [
+                "ffmpeg", "-y", "-i", input_file,
+                "-ss", str(start_time),
+                "-t", str(duration)
+            ]
+
+            # Fade Logic
+            if fade_duration > 0:
+                if duration > fade_duration:
+                    fade_start = duration - fade_duration
+                    filter_str = f"afade=t=out:st={fade_start}:d={fade_duration}"
+                    cmd.extend(["-af", filter_str])
+                    log_func(f" -> Applying {fade_duration}s fade out.\n")
+                else:
+                    log_func(" [WARN] Clip too short for fade out. Skipping.\n")
+
+            # Force format for tools
+            cmd.extend(["-ac", "1", "-ar", "22050", output_file])
+
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, startupinfo=startupinfo)
+            
+            log_func(f" [SUCCESS] Saved to: {output_file}\n")
+            
+        except Exception as e:
+            log_func(f" [ERROR] Trim failed: {e}\n")
+
+    @staticmethod
+    def smart_split_and_encode(ordered_file_list, big_file, output_folder, auto_encode, tool_path, fade_duration, log_func):
         if not os.path.exists(output_folder): os.makedirs(output_folder)
         
         if auto_encode:
@@ -201,10 +247,19 @@ class WavManipulator:
                 cmd = [
                     "ffmpeg", "-y", "-i", big_file,
                     "-ss", str(current_start),
-                    "-t", str(duration),
-                    "-ac", "1", "-ar", "22050",
-                    wav_output_path
+                    "-t", str(duration)
                 ]
+
+                # --- Insert Fade Logic Here ---
+                if fade_duration > 0 and duration > fade_duration:
+                    fade_start = duration - fade_duration
+                    filter_str = f"afade=t=out:st={fade_start}:d={fade_duration}"
+                    cmd.extend(["-af", filter_str])
+                # ------------------------------
+
+                # Force Output Format
+                cmd.extend(["-ac", "1", "-ar", "22050", wav_output_path])
+
                 try:
                     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, startupinfo=startupinfo)
                     log_func(f" -> Cut {ref_name}\n")
@@ -218,13 +273,13 @@ class WavManipulator:
                 wem_output_path = os.path.join(output_folder, wem_name)
                 
                 if AudioEngine.run_conversion(tool_path, wav_output_path, wem_output_path, "Vorbis Quality Low"):
-                     status = " [SILENT WEM]" if is_silence else " [WEM]"
-                     log_func(f"    +{status} Encoded: {wem_name}\n")
+                      status = " [SILENT WEM]" if is_silence else " [WEM]"
+                      log_func(f"    +{status} Encoded: {wem_name}\n")
                 else:
-                     log_func(f"    ! Encoding Failed: {wem_name}\n")
+                      log_func(f"    ! Encoding Failed: {wem_name}\n")
 
 # ==========================================
-#               AUDIO ENGINE
+#                AUDIO ENGINE
 # ==========================================
 
 class AudioEngine:
@@ -426,7 +481,7 @@ class AudioEngine:
                         if current_size > max_size:
                             log_func(f" [WARN] {wem_id}: Too big ({current_size} > {max_size}).\n")
                             if can_shrink:
-                                log_func(f"   -> Attempting Auto-Compression...\n")
+                                log_func(f"    -> Attempting Auto-Compression...\n")
                                 source_wav = os.path.join(wav_source_dir, f"{wem_id}.wav")
                                 if not os.path.exists(source_wav): source_wav = os.path.join(wem_dir, f"{wem_id}.wav")
                                 
@@ -439,11 +494,11 @@ class AudioEngine:
                                             if AudioEngine.run_conversion(tool_path, t_wav, t_wem):
                                                 t_size = os.path.getsize(t_wem)
                                                 if t_size <= max_size:
-                                                    log_func(f"   -> Fits! ({t_size} bytes)\n"); final_inject_path = t_wem; current_size = t_size; success_shrink = True; break
+                                                    log_func(f"    -> Fits! ({t_size} bytes)\n"); final_inject_path = t_wem; current_size = t_size; success_shrink = True; break
                                     if not success_shrink:
-                                        log_func("   -> Failed to shrink enough. Skipping.\n"); continue
+                                        log_func("    -> Failed to shrink enough. Skipping.\n"); continue
                                 else:
-                                    log_func("   -> Source WAV not found. Skipping.\n"); continue
+                                    log_func("    -> Source WAV not found. Skipping.\n"); continue
                             else: continue
 
                         abs_start = data_payload_start + slot['file_offset']
@@ -472,8 +527,8 @@ class AudioEngine:
 class EchoToolApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Echo VR Audio Tool v14 (WAV Extraction)")
-        self.root.geometry("850x900")
+        self.root.title("Echo VR Audio Tool v23 (Merged)")
+        self.root.geometry("900x980")
         self.cfg = ConfigManager()
         
         self.bg_color = "#121212"
@@ -499,9 +554,9 @@ class EchoToolApp:
         self.tab_convert = ttk.Frame(self.notebook)
         self.tab_patch = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_extract, text="  EXTRACT  ")
-        self.notebook.add(self.tab_wav, text="  SEQUENCER / SPLIT  ")
+        self.notebook.add(self.tab_wav, text="  SEQUENCER / TRIMMER  ")
         self.notebook.add(self.tab_convert, text="  CONVERT  ")
-        self.notebook.add(self.tab_patch, text="  PATCH (REPLACE)  ")
+        self.notebook.add(self.tab_patch, text="  PATCH (REBUILD)  ")
 
         self.selected_bnks_extract = []
         self.selected_wavs_convert = []
@@ -533,6 +588,25 @@ class EchoToolApp:
         tk.Button(frame, text="...", bg=self.btn_bg, fg="white", relief="flat", width=4, command=btn_cmd).pack(side=tk.RIGHT, padx=5)
         return entry
 
+    def save_ui_state(self):
+        """Forces all UI values into config before running operations"""
+        self.cfg.set('decoder_path', self.e_decoder.get())
+        self.cfg.set('extract_output_dir', self.e_out_ex.get())
+        
+        # Splitter Settings
+        self.cfg.set('fade_duration', self.e_fade_dur.get())
+        
+        # Trimmer Settings
+        self.cfg.set('trim_start', self.e_trim_start.get())
+        self.cfg.set('trim_end', self.e_trim_end.get())
+        self.cfg.set('trim_fade_duration', self.e_trim_fade.get())
+        
+        self.cfg.set('tool_path', self.e_tool_cv.get())
+        self.cfg.set('convert_output_dir', self.e_out_cv.get())
+        self.cfg.set('patch_wem_dir', self.e_wem_pt.get())
+        self.cfg.set('patch_wav_source_dir', self.e_wav_src_pt.get())
+        self.cfg.set('patch_output_dir', self.e_out_pt.get())
+
     # --- 1. EXTRACT ---
     def setup_extract_tab(self):
         f = self.tab_extract
@@ -542,25 +616,21 @@ class EchoToolApp:
         self.e_out_ex = self.create_entry_row(f, lambda: self.browse_folder('extract_output_dir', self.e_out_ex))
         self.e_out_ex.insert(0, self.cfg.get('extract_output_dir'))
         
-        # Decoder section
         lf_dec = tk.LabelFrame(f, text=" Optional Conversion ", bg=self.bg_color, fg=self.fg_color)
         lf_dec.pack(fill=tk.X, padx=20, pady=10)
-        
         self.var_extract_wav = tk.BooleanVar(value=False)
-        tk.Checkbutton(lf_dec, text="Convert extracted WEMs to WAV (Requires Tool)", variable=self.var_extract_wav, bg=self.bg_color, fg="white", selectcolor=self.bg_color).pack(anchor="w", padx=10, pady=5)
-        
-        tk.Label(lf_dec, text="Decoder Tool Path (vgmstream-cli.exe):", bg=self.bg_color, fg="gray").pack(anchor="w", padx=10)
-        self.e_decoder = self.create_entry_row(lf_dec, self.browse_decoder)
-        self.e_decoder.insert(0, self.cfg.get('decoder_path'))
-
+        tk.Checkbutton(lf_dec, text="Convert to WAV", variable=self.var_extract_wav, bg=self.bg_color, fg="white", selectcolor=self.bg_color).pack(anchor="w", padx=10, pady=5)
+        tk.Label(lf_dec, text="Decoder Tool (vgmstream):", bg=self.bg_color, fg="gray").pack(anchor="w", padx=10)
+        self.e_decoder = self.create_entry_row(lf_dec, self.browse_decoder); self.e_decoder.insert(0, self.cfg.get('decoder_path'))
         tk.Button(f, text="START EXTRACTION", bg=self.accent_color, fg="white", font=("Segoe UI", 10, "bold"), relief="flat", pady=8, command=self.run_extract).pack(pady=20, fill=tk.X, padx=150)
 
-    # --- 2. SEQUENCER ---
+    # --- 2. SEQUENCER & TRIMMER ---
     def setup_wav_tab(self):
         f = self.tab_wav
+        # Left Panel (Sequence List)
         frame_list = tk.Frame(f, bg=self.bg_color)
         frame_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
-        self.create_label(frame_list, "Step 1: Original Files Sequence").pack(anchor="w")
+        self.create_label(frame_list, "Step 1: Original Sequence").pack(anchor="w")
         self.lb_seq = tk.Listbox(frame_list, bg="#1E1E1E", fg="white", selectbackground=self.accent_color, height=15)
         self.lb_seq.pack(fill=tk.BOTH, expand=True, pady=5)
         btn_box = tk.Frame(frame_list, bg=self.bg_color)
@@ -570,21 +640,69 @@ class EchoToolApp:
         tk.Button(btn_box, text="▼ Down", command=self.seq_down).pack(side=tk.RIGHT, padx=2)
         tk.Button(btn_box, text="▲ Up", command=self.seq_up).pack(side=tk.RIGHT, padx=2)
 
+        # Right Panel (Operations)
         frame_act = tk.Frame(f, bg=self.bg_color)
         frame_act.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # --- MERGE ---
         tk.Label(frame_act, text="Visualize Original:", bg=self.bg_color, fg=self.fg_color, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0,5))
-        tk.Button(frame_act, text="CREATE REFERENCE TEMPLATE\n(Merges list into one WAV)", bg="#555", fg="white", command=self.run_seq_merge).pack(fill=tk.X, pady=5)
-        tk.Label(frame_act, text="--------------------------------", bg=self.bg_color, fg="#333").pack(pady=10)
+        tk.Button(frame_act, text="CREATE REFERENCE TEMPLATE", bg="#555", fg="white", command=self.run_seq_merge).pack(fill=tk.X, pady=5)
+        tk.Label(frame_act, text="--------------------------------", bg=self.bg_color, fg="#333").pack(pady=5)
+        
+        # --- SPLIT ---
         self.create_label(frame_act, "Step 2: Split Custom File").pack(anchor="w")
         self.e_big_file = self.create_entry_row(frame_act, self.browse_big_file)
+        
+        # FADE OPTIONS (SPLITTER)
+        fade_frame = tk.Frame(frame_act, bg=self.bg_color)
+        fade_frame.pack(fill=tk.X, pady=5)
+        self.var_fade = tk.BooleanVar(value=True)
+        tk.Checkbutton(fade_frame, text="Apply Fade Out", variable=self.var_fade, bg=self.bg_color, fg="white", selectcolor=self.bg_color).pack(side=tk.LEFT)
+        tk.Label(fade_frame, text="Duration (s):", bg=self.bg_color, fg="gray").pack(side=tk.LEFT, padx=(10, 5))
+        self.e_fade_dur = tk.Entry(fade_frame, width=5, bg=self.entry_bg, fg="white", insertbackground="white")
+        self.e_fade_dur.pack(side=tk.LEFT)
+        self.e_fade_dur.insert(0, self.cfg.get('fade_duration'))
+
         self.var_auto_enc_split = tk.BooleanVar(value=True)
-        tk.Checkbutton(frame_act, text="Auto-Encode to WEM", variable=self.var_auto_enc_split, bg=self.bg_color, fg="white", selectcolor=self.bg_color).pack(anchor="w", pady=5)
-        tk.Button(frame_act, text="SPLIT & MATCH SEQUENCE", bg=self.warn_color, fg="white", font=("Segoe UI", 11, "bold"), height=2, command=self.run_seq_split).pack(fill=tk.X, pady=20)
+        tk.Checkbutton(frame_act, text="Auto-Encode Split Files", variable=self.var_auto_enc_split, bg=self.bg_color, fg="white", selectcolor=self.bg_color).pack(anchor="w", pady=5)
+        tk.Button(frame_act, text="SPLIT & MATCH SEQUENCE", bg=self.warn_color, fg="white", font=("Segoe UI", 11, "bold"), height=2, command=self.run_seq_split).pack(fill=tk.X, pady=10)
+
+        # --- TRIM ---
+        lf_trim = tk.LabelFrame(frame_act, text=" Step 3: Single File Trimmer ", bg=self.bg_color, fg="white", padx=10, pady=10)
+        lf_trim.pack(fill=tk.X, pady=10)
+        
+        self.e_trim_file = self.create_entry_row(lf_trim, self.browse_trim_file)
+        
+        # Time Row
+        time_frame = tk.Frame(lf_trim, bg=self.bg_color)
+        time_frame.pack(fill=tk.X, pady=5)
+        tk.Label(time_frame, text="Start (s):", bg=self.bg_color, fg="white").pack(side=tk.LEFT)
+        self.e_trim_start = tk.Entry(time_frame, width=8, bg=self.entry_bg, fg="white", insertbackground="white")
+        self.e_trim_start.pack(side=tk.LEFT, padx=5)
+        self.e_trim_start.insert(0, self.cfg.get('trim_start'))
+        
+        tk.Label(time_frame, text="End (s):", bg=self.bg_color, fg="white").pack(side=tk.LEFT, padx=(10, 0))
+        self.e_trim_end = tk.Entry(time_frame, width=8, bg=self.entry_bg, fg="white", insertbackground="white")
+        self.e_trim_end.pack(side=tk.LEFT, padx=5)
+        self.e_trim_end.insert(0, self.cfg.get('trim_end'))
+        
+        # Trim Fade Row
+        trim_fade_frame = tk.Frame(lf_trim, bg=self.bg_color)
+        trim_fade_frame.pack(fill=tk.X, pady=5)
+        self.var_trim_fade = tk.BooleanVar(value=True)
+        tk.Checkbutton(trim_fade_frame, text="Apply Fade Out", variable=self.var_trim_fade, bg=self.bg_color, fg="white", selectcolor=self.bg_color).pack(side=tk.LEFT)
+        tk.Label(trim_fade_frame, text="Duration (s):", bg=self.bg_color, fg="gray").pack(side=tk.LEFT, padx=(10, 5))
+        self.e_trim_fade = tk.Entry(trim_fade_frame, width=6, bg=self.entry_bg, fg="white", insertbackground="white")
+        self.e_trim_fade.pack(side=tk.LEFT)
+        self.e_trim_fade.insert(0, self.cfg.get('trim_fade_duration'))
+
+        tk.Button(lf_trim, text="CUT FILE", bg="#00897B", fg="white", font=("Segoe UI", 9, "bold"), command=self.run_trim_single).pack(fill=tk.X, pady=5)
+
 
     # --- 3. CONVERT ---
     def setup_convert_tab(self):
         f = self.tab_convert
-        self.create_label(f, "Tool Path:").pack(pady=(15, 5))
+        self.create_label(f, "Tool Path (sound2wem/wwise_cli):").pack(pady=(15, 5))
         self.e_tool_cv = self.create_entry_row(f, self.browse_tool_path); self.e_tool_cv.insert(0, self.cfg.get('tool_path'))
         self.create_label(f, "Select WAV Files:").pack(pady=(15, 5))
         self.e_wav_cv = self.create_entry_row(f, self.browse_wavs_cv)
@@ -597,9 +715,11 @@ class EchoToolApp:
         f = self.tab_patch
         self.create_label(f, "Original Bank Files:").pack(pady=(10, 2))
         self.e_bnk_pt = self.create_entry_row(f, self.browse_bnks_pt)
-        self.create_label(f, "Folder with New .wems:").pack(pady=(10, 2))
+        self.create_label(f, "Folder with REPLACEMENT .wems:").pack(pady=(10, 2))
+        tk.Label(f, text="(Files must be named ID.wem)", bg=self.bg_color, fg="gray").pack()
         self.e_wem_pt = self.create_entry_row(f, lambda: self.browse_folder('patch_wem_dir', self.e_wem_pt)); self.e_wem_pt.insert(0, self.cfg.get('patch_wem_dir'))
         
+        # Auto-shrink GUI
         frame_adv = tk.LabelFrame(f, text=" Smart Auto-Fit ", bg=self.bg_color, fg="#4FC3F7")
         frame_adv.pack(fill=tk.X, padx=20, pady=10)
         self.var_autoshrink = tk.BooleanVar(value=True)
@@ -608,7 +728,7 @@ class EchoToolApp:
 
         self.create_label(f, "Output Folder:").pack(pady=(10, 2))
         self.e_out_pt = self.create_entry_row(f, lambda: self.browse_folder('patch_output_dir', self.e_out_pt)); self.e_out_pt.insert(0, self.cfg.get('patch_output_dir'))
-        tk.Button(f, text="PATCH BANK", bg=self.success_color, fg="white", font=("Segoe UI", 11, "bold"), relief="flat", pady=10, command=self.run_patch).pack(pady=20, fill=tk.X, padx=100)
+        tk.Button(f, text="REBUILD BANK", bg=self.success_color, fg="white", font=("Segoe UI", 11, "bold"), relief="flat", pady=10, command=self.run_patch).pack(pady=20, fill=tk.X, padx=100)
 
     # --- LISTBOX & BROWSERS ---
     def seq_add(self):
@@ -651,23 +771,59 @@ class EchoToolApp:
     def browse_big_file(self):
         f = filedialog.askopenfilename(initialdir=self.cfg.get('wav_tools_dir'), filetypes=[("WAV", "*.wav")])
         if f: self.e_big_file.delete(0, tk.END); self.e_big_file.insert(0, f)
+    def browse_trim_file(self):
+        f = filedialog.askopenfilename(initialdir=self.cfg.get('wav_tools_dir'), filetypes=[("WAV", "*.wav")])
+        if f: self.e_trim_file.delete(0, tk.END); self.e_trim_file.insert(0, f)
 
     # --- ACTIONS ---
-    def run_extract(self): 
+    def run_extract(self):
+        self.save_ui_state()
         threading.Thread(target=AudioEngine.extract_batch, args=(self.selected_bnks_extract, self.e_out_ex.get(), self.var_extract_wav.get(), self.e_decoder.get(), self.log)).start()
-    def run_convert(self): threading.Thread(target=AudioEngine.convert_batch, args=(self.selected_wavs_convert, self.e_out_cv.get(), "Vorbis Quality High", self.e_tool_cv.get(), self.log)).start()
-    def run_patch(self): threading.Thread(target=AudioEngine.patch_batch, args=(self.selected_bnks_patch, self.e_wem_pt.get(), self.e_wav_src_pt.get(), self.e_out_pt.get(), self.e_tool_cv.get(), self.var_autoshrink.get(), self.log)).start()
+    
+    def run_convert(self): 
+        self.save_ui_state()
+        threading.Thread(target=AudioEngine.convert_batch, args=(self.selected_wavs_convert, self.e_out_cv.get(), "Vorbis Quality High", self.e_tool_cv.get(), self.log)).start()
+    
+    def run_patch(self): 
+        self.save_ui_state()
+        threading.Thread(target=AudioEngine.patch_batch, args=(self.selected_bnks_patch, self.e_wem_pt.get(), self.e_wav_src_pt.get(), self.e_out_pt.get(), self.e_tool_cv.get(), self.var_autoshrink.get(), self.log)).start()
+    
     def run_seq_merge(self):
         if len(self.seq_files) < 2: messagebox.showwarning("Info", "Add at least 2 files."); return
         out_f = filedialog.asksaveasfilename(defaultextension=".wav", filetypes=[("WAV", "*.wav")], initialfile="Reference_Template.wav")
         if out_f: threading.Thread(target=WavManipulator.merge_wavs, args=(self.seq_files, out_f, self.log)).start()
+    
     def run_seq_split(self):
+        self.save_ui_state()
         big_f = self.e_big_file.get()
         if not self.seq_files or not big_f: messagebox.showwarning("Missing Info", "Missing files."); return
+        
         tool_path = self.e_tool_cv.get(); do_encode = self.var_auto_enc_split.get()
         if not tool_path: tool_path = self.cfg.get('tool_path')
+        
+        fade_sec = 0.0
+        if self.var_fade.get():
+            try: fade_sec = float(self.e_fade_dur.get())
+            except: self.log("[WARN] Invalid fade duration, using 0s.\n")
+        
         out_dir = os.path.join(os.path.dirname(big_f), "Split_Output")
-        threading.Thread(target=WavManipulator.smart_split_and_encode, args=(self.seq_files, big_f, out_dir, do_encode, tool_path, self.log)).start()
+        threading.Thread(target=WavManipulator.smart_split_and_encode, args=(self.seq_files, big_f, out_dir, do_encode, tool_path, fade_sec, self.log)).start()
+
+    def run_trim_single(self):
+        self.save_ui_state()
+        f_path = self.e_trim_file.get()
+        if not os.path.exists(f_path): messagebox.showwarning("Error", "File not found."); return
+
+        try:
+            start = float(self.e_trim_start.get())
+            end = float(self.e_trim_end.get())
+            fade = float(self.e_trim_fade.get()) if self.var_trim_fade.get() else 0.0
+        except ValueError:
+            messagebox.showwarning("Error", "Please enter valid numbers for Time and Fade."); return
+
+        out_f = filedialog.asksaveasfilename(defaultextension=".wav", filetypes=[("WAV", "*.wav")], initialfile=f"Cut_{os.path.basename(f_path)}")
+        if out_f:
+            threading.Thread(target=WavManipulator.run_single_trim, args=(f_path, out_f, start, end, fade, self.log)).start()
 
 if __name__ == "__main__":
     root = tk.Tk()
