@@ -1,4 +1,2 @@
 # EchoVR-Audio-Editor
-Most basic script to change audio in echo vr
-
-there is no good way of making .wem files that are quick and easy, use audiokinetic wwise launcher
+Using this tool can be annoying, only use it if you know what you are doing, evrfiletools is not included yet
